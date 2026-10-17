@@ -27,7 +27,7 @@
   --bg:#EFF5F2; --surface:#FFFFFF; --surface2:#E6EFEA; --ink:#0F2A20; --muted:#587066; --line:#D5E3DB;
   --brand:#12925A; --brand-soft:#DDF3E8; --band:#0B4D38; --band-ink:#EFFAF4; --band-muted:#A8D8BF;
   --grad:linear-gradient(135deg,#0A4A36 0%,#0F7A4B 55%,#1AA463 100%);
-  --blue:#2C78D4; --blue-soft:#E4EEFB; --amber:#E2A10F; --amber-soft:#FDF1D3;
+  --blue:#2C78D4; --blue-soft:#E4EEFB; --rose:#D13F4A; --rose-soft:#FCE7E8; --amber:#E2A10F; --amber-soft:#FDF1D3;
   --ok:#1C9A57; --ok-soft:#DDF3E6; --warn:#C98F00; --warn-soft:#FBF0D2; --bad:#CF3F3F; --bad-soft:#F9E0E0; --off:#9AA9A5;
   --shadow:0 1px 2px rgba(16,35,31,.06),0 6px 20px rgba(16,35,31,.06);
   --f-display:"Bricolage Grotesque","Segoe UI",system-ui,sans-serif;
@@ -1107,9 +1107,9 @@ function auditSummary(id, ward){
   const mk = monthKey(today()), mine = wardEntries(ward, id), mo = monthEntries(mine, mk);
   return {real:true, pct:avg(scored(mo).map(e=>e.pct)), n:mo.length, wk:weekInfo(mine).length, open:mine.reduce((a,e)=>a+(e.openIssues||0),0)};
 }
-const AUD_COLOR = {ipc:'#12925A', phleb:'#2C78D4', fall:'#D99A0B'};
+const AUD_COLOR = {ipc:'#12925A', phleb:'#D13F4A', fall:'#D99A0B'};
 function vAuditCard(a, sm){
-  const bg = a.id==='ipc' ? 'var(--brand-soft)' : a.id==='phleb' ? 'var(--blue-soft)' : 'var(--amber-soft)';
+  const bg = a.id==='ipc' ? 'var(--brand-soft)' : a.id==='phleb' ? 'var(--rose-soft)' : 'var(--amber-soft)';
   if(!sm) return `<div class="acard" style="background:${bg}"><div class="ah">${auditImg(a.id,52)}<div class="b"><div class="t1">${a.name}</div><div class="t2">Akan datang</div></div></div></div>`;
   const g = gradeOf(sm.pct);
   const on = (S.trendAud||'all') === a.id;
@@ -1210,7 +1210,7 @@ function vModule(){
 function vModBanner(){
   const tp = T();
   if(tp.id === 'ipc') return `<img class="hbanner" src="${IMG.ipc}" alt="Infection Control / Hand Hygiene">`;
-  const bg = tp.id==='phleb' ? 'linear-gradient(120deg,#0F4C8A,#2C78D4 60%,#7DB6F0)' : 'linear-gradient(120deg,#8A5A00,#D99A0B 60%,#F6CF6B)';
+  const bg = tp.id==='phleb' ? 'linear-gradient(120deg,#8E1F2A,#D13F4A 60%,#F2939A)' : 'linear-gradient(120deg,#8A5A00,#D99A0B 60%,#F6CF6B)';
   return `<div class="mbanner" style="background:${bg}">${logo(46)}<div class="mb-t"><div class="mb-s">SMART N Manager</div><div class="mb-h">${tp.id==='phleb'?'Phlebitis Monitoring':'Patient Fall Prevention'}</div><div class="mb-x">${esc(tp.source)}</div></div>${auditImg(tp.id,86)}</div>`;
 }
 function vDash(list){
