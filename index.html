@@ -354,7 +354,10 @@ table.t td.num{font-family:var(--f-mono);text-align:right}
 .sheet .pill{white-space:normal}
 .x-btn{border:0;background:var(--surface2);width:36px;height:36px;border-radius:10px;display:grid;place-items:center;color:var(--ink)}
 
-.toast{position:fixed;left:50%;bottom:calc(90px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:80;background:var(--ink);color:var(--surface);padding:11px 18px;border-radius:12px;font-weight:600;font-size:14px;box-shadow:var(--shadow);max-width:calc(100% - 32px)}
+#netbar{position:fixed;left:0;right:0;bottom:calc(64px + env(safe-area-inset-bottom,0px));z-index:26;font-size:13px;line-height:1.35;padding:9px max(16px,env(safe-area-inset-right,0px)) 9px max(16px,env(safe-area-inset-left,0px));text-align:center}
+#netbar.off{background:#3A3012;color:#FCE9B0}
+#netbar.sync{background:var(--brand-soft);color:#0B6B41}
+.toast{position:fixed;left:50%;bottom:calc(90px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:120;background:var(--ink);color:var(--surface);padding:11px 18px;border-radius:12px;font-weight:600;font-size:14px;box-shadow:var(--shadow);max-width:calc(100% - 32px)}
 
 /* ---------- Report ---------- */
 .report{background:#fff;color:#111;border-radius:14px;padding:22px;border:1px solid var(--line);font-size:13px}
@@ -407,6 +410,7 @@ const IMG = {
 <script>document.getElementById("spImg").src = IMG.splash; document.getElementById("spBg").style.backgroundImage = "url(" + IMG.splash + ")";</script>
 
 <div id="app"></div>
+<div id="netbar" hidden></div>
 <div id="modal"></div>
 <div id="modal2"></div>
 <input type="file" id="evCam" accept="image/*" capture="environment" hidden>
@@ -646,12 +650,94 @@ function findingsRows(e){
       rows.push([e.id, T().name, e.ward, e.date, s.t, txt, v, r.obs||'', r.jawatan||'', r.nama||'', r.note||'', issue?'YA':'', issue?(r.fix==='done'?'Sudah diperbetulkan':'Belum diperbetulkan'):'', r.fixNote||'']); }));
     return rows; });
 }
+function netErr(msg){ const e = new Error(msg); e.net = true; return e; }
+/* ---------- Storan telefon (IndexedDB) untuk mod luar talian ---------- */
+const IDB = (() => {
+  let dbp;
+  const open = () => dbp || (dbp = new Promise((res, rej) => { try{ const r = indexedDB.open('smartn', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }catch(e){ rej(e); } }));
+  const run = async (mode, fn) => { const db = await open(); return new Promise((res, rej) => { const t = db.transaction('kv', mode), rq = fn(t.objectStore('kv')); t.oncomplete = () => res(rq && rq.result); t.onerror = () => rej(t.error); }); };
+  return { get: k => run('readonly', st => st.get(k)).catch(() => undefined), set: (k, v) => run('readwrite', st => st.put(v, k)).catch(() => {}), del: k => run('readwrite', st => st.delete(k)).catch(() => {}) };
+})();
+const NET = {queue: [], flushing: false, needLogin: false};
+async function loadQueue(){ NET.queue = (await IDB.get('queue')) || []; }
+async function saveQueue(){ await IDB.set('queue', NET.queue); updateNetBar(); }
+async function enqueue(e){
+  const copy = JSON.parse(JSON.stringify(e)); delete copy._pending; delete copy._new;
+  const i = NET.queue.findIndex(x => x.id === copy.id); if(i >= 0) NET.queue[i] = copy; else NET.queue.push(copy);
+  await saveQueue();
+}
+function markPending(e){ e._pending = true; const i = S.entries.findIndex(x => x.id === e.id); if(i>=0) S.entries[i] = e; else S.entries.push(e); }
+/* Muat naik gambar & bukti yang belum dihantar, kemudian simpan entry */
+async function syncEntry(e, prog){
+  const tp = tplOf(e);
+  const photos = Object.entries(e.photos||{}).flatMap(([k, arr]) => (arr||[]).map(p => ({k, p}))).filter(x => !x.p.url && x.p.data);
+  const ev = Object.entries(e.answers||{}).flatMap(([iid, r]) => (r.fixFiles||[]).map(f => ({iid, f}))).filter(x => !x.f.url && x.f.data);
+  const total = photos.length + ev.length; let n = 0;
+  for(const {k, p} of photos){
+    n++; prog && prog(`Muat naik ${n}/${total}…`);
+    const ki = withAudit(e.audit, () => keyInfo(k));
+    const r = await api('uploadPhoto', {entryId:e.id, photoId:p.id, ward:e.ward, date:e.date, section:ki.s.t, item:ki.txt, remark:p.remark, dataUrl:p.data});
+    p.url = r.url; p.fileId = r.fileId; if(!DEMO) delete p.data;
+  }
+  for(const {iid, f} of ev){
+    n++; prog && prog(`Muat naik ${n}/${total}…`);
+    const ki = withAudit(e.audit, () => keyInfo(iid));
+    const r = await api('uploadEvidence', {entryId:e.id, itemId:iid, ward:e.ward, section:ki.s.t, item:ki.txt, name:f.name, mime:f.type, dataUrl:f.data, fileId:f.id});
+    f.url = r.url; if(!DEMO) delete f.data;
+  }
+  prog && prog('Menyimpan…');
+  const clean = JSON.parse(JSON.stringify(e)); delete clean._new; delete clean._pending;
+  if(!DEMO){ Object.values(clean.photos||{}).forEach(a => a.forEach(p => delete p.data)); Object.values(clean.answers||{}).forEach(r => (r.fixFiles||[]).forEach(f => delete f.data)); }
+  finalize(clean);
+  await api('saveEntry', {entry: clean});
+  return clean;
+}
+/* Simpan: terus ke pelayan jika ada internet; jika tiada, simpan dalam telefon */
+async function persistEntry(e, prog){
+  finalize(e);
+  if(DEMO) return {entry: await syncEntry(e, prog), queued:false};
+  if(!navigator.onLine){ await enqueue(e); markPending(e); return {entry:e, queued:true}; }
+  try{ const c = await syncEntry(e, prog); NET.queue = NET.queue.filter(x => x.id !== c.id); await saveQueue(); return {entry:c, queued:false}; }
+  catch(err){ if(err.net){ await enqueue(e); markPending(e); return {entry:e, queued:true}; } throw err; }
+}
+async function flushQueue(){
+  if(DEMO || NET.flushing || !navigator.onLine || !S.token || !NET.queue.length) { updateNetBar(); return; }
+  NET.flushing = true; NET.needLogin = false; updateNetBar();
+  let sent = 0;
+  try{
+    for(const e of [...NET.queue]){
+      const c = await syncEntry(e);
+      NET.queue = NET.queue.filter(x => x.id !== c.id); await saveQueue(); sent++;
+      const i = S.entries.findIndex(x => x.id === c.id); if(i>=0) S.entries[i] = c; else S.entries.push(c);
+    }
+  }catch(err){ if(!err.net){ if(/Sesi tamat/i.test(err.message)) NET.needLogin = true; else toast('Gagal hantar data tersimpan: '+err.message, 6000); } }
+  NET.flushing = false;
+  if(sent){ toast(`${sent} data dari telefon telah dihantar ke pelayan ✓`, 4000); if(S.screen!=='login' && !S.draft) { const y = window.scrollY; render(); window.scrollTo(0,y); } }
+  updateNetBar();
+}
+function updateNetBar(){
+  const el = document.getElementById('netbar'); if(!el) return;
+  const n = NET.queue.length, off = !navigator.onLine;
+  let html = '';
+  if(off) html = `<b>Tiada internet</b> · data yang disimpan akan disimpan dalam telefon${n?` (${n} menunggu)`:''} dan dihantar automatik bila ada internet.`;
+  else if(NET.needLogin && n) html = `<b>${n} data belum dihantar</b> · sesi tamat, sila log masuk semula untuk menghantar.`;
+  else if(NET.flushing) html = `<b>Menghantar ${n} data dari telefon…</b>`;
+  else if(n) html = `<b>${n} data belum dihantar</b> · akan dicuba semula sebentar lagi.`;
+  el.innerHTML = html; el.hidden = !html; el.className = off ? 'off' : 'sync';
+}
+window.addEventListener('online', () => { updateNetBar(); setTimeout(flushQueue, 1500); });
+window.addEventListener('offline', updateNetBar);
+document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'visible') flushQueue(); });
+setInterval(flushQueue, 30000);
 async function api(action, data={}){
   if(action === 'saveEntry' && data.entry){ data.entry.auditName = tplOf(data.entry).name; if(!DEMO) data.findings = findingsRows(data.entry); }
   if(DEMO) return demoApi(action, data);
   let res, j;
-  try{ res = await fetch(CONFIG.API_URL, {method:'POST', body: JSON.stringify({action, token:S.token, ...data})}); }
-  catch(e){ throw new Error('Tiada sambungan ke Apps Script. Semak internet, dan pastikan Web App di-deploy dengan akses "Anyone".'); }
+  const ctl = new AbortController(), tmr = setTimeout(() => ctl.abort(), action==='uploadPhoto'||action==='uploadEvidence' ? 90000 : 40000);
+  try{ res = await fetch(CONFIG.API_URL, {method:'POST', body: JSON.stringify({action, token:S.token, ...data}), signal: ctl.signal, redirect:'follow'}); }
+  catch(e){ clearTimeout(tmr); throw netErr(e.name==='AbortError' ? 'Pelayan Apps Script tidak menjawab (tamat masa). Cuba lagi; jika berulang, semak Apps Script › Executions untuk ralat.' : 'Tiada sambungan ke Apps Script. Semak internet, dan pastikan Web App di-deploy dengan akses "Anyone".'); }
+  clearTimeout(tmr);
+  if(!res.ok && res.status >= 500) throw netErr('Pelayan sibuk ('+res.status+'). Data akan dihantar semula.');
   try{ j = await res.json(); }
   catch(e){ throw new Error('Apps Script tidak memulangkan data yang sah. Pastikan URL betul (berakhir /exec) dan deploy versi terkini.'); }
   if(!j.ok) throw new Error(j.error || 'Ralat pelayan');
@@ -761,21 +847,30 @@ function toast(msg, ms=2600){ const t = document.createElement('div'); t.classNa
 async function boot(){
   S.cfgError = '';
   try{ const c = await api('getConfig'); S.wards = c.wards || []; S.wardBld = c.bld || {};
-    if(!S.wards.length) S.cfgError = 'Senarai wad dalam sheet "Wards" kosong. Jalankan fungsi setup() dalam Apps Script.'; }
-  catch(e){ S.cfgError = e.message; }
+    if(!S.wards.length) S.cfgError = 'Senarai wad dalam sheet "Wards" kosong. Jalankan fungsi setup() dalam Apps Script.';
+    else if(!DEMO) IDB.set('config', {wards:S.wards, bld:S.wardBld}); }
+  catch(e){ const cc = DEMO ? null : await IDB.get('config'); if(cc && cc.wards && cc.wards.length){ S.wards = cc.wards; S.wardBld = cc.bld || {}; if(!e.net) S.cfgError = e.message; } else S.cfgError = e.message; }
+  if(!DEMO) await loadQueue();
   if(!S.wards.length){ // senarai sandaran supaya pilihan wad tetap keluar
     S.wards = [...WARDS_MAIN, ...WARDS_WCC];
     S.wardBld = Object.fromEntries([...WARDS_MAIN.map(w=>[w,'Main']), ...WARDS_WCC.map(w=>[w,'WCC'])]);
   }
-  const sess = (()=>{ try{ return JSON.parse(sessionStorage.getItem('smartn_sess')); }catch(e){ return null; } })();
-  if(sess && sess.token){ Object.assign(S, sess); await loadEntries(); S.screen = S.role==='coord' ? 'coord' : 'home'; if(S.role==='coord') S.tab='dash'; }
+  const sess = (()=>{ try{ return JSON.parse(localStorage.getItem('smartn_sess')); }catch(e){ return null; } })();
+  if(sess && sess.token){ Object.assign(S, sess); await loadEntries(); flushQueue(); S.screen = S.role==='coord' ? 'coord' : 'home'; if(S.role==='coord') S.tab='dash'; }
   render();
   setTimeout(() => { $('#splash').classList.add('out'); setTimeout(()=>$('#splash').remove(), 600); }, 2400);
 }
-function saveSess(){ try{ sessionStorage.setItem('smartn_sess', JSON.stringify({token:S.token, role:S.role, user:S.user, ward:S.ward})); }catch(e){} }
+function saveSess(){ try{ localStorage.setItem('smartn_sess', JSON.stringify({token:S.token, role:S.role, user:S.user, ward:S.ward})); }catch(e){} }
 async function loadEntries(){
-  try{ const r = await api('listEntries', {ward: S.role==='coord' ? '' : S.ward}); S.entries = (r.entries||[]).map(e => finalize(e)); }
-  catch(e){ toast('Gagal memuatkan entry: '+e.message); S.entries = []; }
+  const ck = 'cache_' + (S.role==='coord' ? 'all' : S.ward);
+  try{ const r = await api('listEntries', {ward: S.role==='coord' ? '' : S.ward}); S.entries = (r.entries||[]).map(e => finalize(e)); if(!DEMO) IDB.set(ck, S.entries); }
+  catch(e){
+    const c = DEMO ? null : await IDB.get(ck);
+    if(c){ S.entries = c.map(x => finalize(x)); toast(e.net ? 'Tiada internet — memaparkan data tersimpan dalam telefon.' : 'Gagal memuatkan entry: '+e.message, 4500); }
+    else { toast('Gagal memuatkan entry: '+e.message); S.entries = []; }
+    if(/Sesi tamat/i.test(e.message)) NET.needLogin = true;
+  }
+  if(!DEMO){ await loadQueue(); NET.queue.forEach(q => { if(S.role==='coord' || q.ward===S.ward) markPending(finalize(JSON.parse(JSON.stringify(q)))); }); updateNetBar(); }
 }
 
 /* ---------- Render root ---------- */
@@ -853,7 +948,9 @@ function vLogin(){
 }
 async function doLogin(ev){
   ev.preventDefault();
+  if(!DEMO && !navigator.onLine){ toast('Tiada internet. Log masuk memerlukan internet; selepas log masuk, audit boleh dibuat tanpa internet.', 6000); return; }
   const btn = $('#lgBtn'); btn.disabled = true; btn.textContent = 'Menyemak…';
+  const slow = setTimeout(() => { if(btn.disabled) btn.textContent = 'Menyambung ke pelayan… (kali pertama boleh ambil 10–20 saat)'; }, 4000);
   try{
     if(S.loginTab === 'staff'){
       const password = $('#lgIc').value, ward = $('#lgWard').value;
@@ -866,8 +963,9 @@ async function doLogin(ev){
       const r = await api('coordLogin', {username:$('#lgUser').value.trim(), password:$('#lgPass').value});
       Object.assign(S, {token:r.token, user:r.user, role:'coord', ward:null, screen:'coord', tab:'dash', audit:'all'});
     }
-    saveSess(); await loadEntries(); S.showPw=false; S.showRemind=false; render(); window.scrollTo(0,0);
-  }catch(e){ toast(e.message); btn.disabled=false; btn.textContent='Log Masuk'; }
+    btn.textContent = 'Memuatkan data…';
+    saveSess(); await loadEntries(); flushQueue(); clearTimeout(slow); S.showPw=false; S.showRemind=false; render(); window.scrollTo(0,0);
+  }catch(e){ clearTimeout(slow); toast(e.message, 6000); S.cfgError = e.message; btn.disabled=false; btn.textContent='Log Masuk'; const keep = {u:$('#lgUser')?.value, w:$('#lgWard')?.value}; render(); if($('#lgUser')) $('#lgUser').value = keep.u||''; if($('#lgWard')&&keep.w) $('#lgWard').value = keep.w; }
 }
 
 /* ---------- Data helpers ---------- */
@@ -1331,22 +1429,12 @@ async function saveDraft(){
   if(!e.auditor){ toast('Sila isi nama anda di ruangan "Audit oleh".'); $('#fAud').focus(); return; }
   const btn = document.querySelector('[data-act="saveDraft"]'); btn.disabled = true;
   try{
-    const all = Object.entries(e.photos).flatMap(([sec, arr]) => arr.map(p => ({sec, p}))).filter(x => !x.p.url);
-    let k = 0;
-    for(const {sec, p} of all){
-      k++; btn.textContent = `Muat naik gambar ${k}/${all.length}…`;
-      const ki = keyInfo(sec);
-      const r = await api('uploadPhoto', {entryId:e.id, photoId:p.id, ward:e.ward, date:e.date, section:ki.s.t, item:ki.txt, remark:p.remark, dataUrl:p.data});
-      p.url = r.url; p.fileId = r.fileId; if(!DEMO) delete p.data;
-    }
-    btn.textContent = 'Menyimpan…';
-    const clean = JSON.parse(JSON.stringify(e)); delete clean._new;
-    Object.values(clean.photos).forEach(arr => arr.forEach(p => { if(!DEMO) delete p.data; }));
-    finalize(clean);
-    await api('saveEntry', {entry: clean});
-    const i = S.entries.findIndex(x => x.id === clean.id); if(i>=0) S.entries[i] = clean; else S.entries.push(clean);
-    S.draft = null; S.openSec = null; S.tab = 'list'; S.listMonth = clean.date.slice(0,7);
-    toast(clean.status==='Draf' ? `Disimpan sebagai pending · ${clean.done}/${T().sections.length} seksyen` : `Audit dihantar · ${pctTxt(clean.pct)} (Gred ${clean.grade})`);
+    delete e._new;
+    const res = await persistEntry(e, t => btn.textContent = t);
+    const c = res.entry;
+    if(!res.queued){ const i = S.entries.findIndex(x => x.id === c.id); if(i>=0) S.entries[i] = c; else S.entries.push(c); }
+    S.draft = null; S.openSec = null; S.tab = 'list'; S.listMonth = c.date.slice(0,7);
+    toast(res.queued ? 'Tiada internet — audit disimpan dalam telefon dan akan dihantar automatik.' : c.status==='Draf' ? `Disimpan sebagai pending · ${c.done}/${T().sections.length} seksyen` : `Audit dihantar · ${pctTxt(c.pct)} (Gred ${c.grade})`, res.queued ? 5000 : 2600);
     render(); window.scrollTo(0,0);
   }catch(err){ toast('Gagal simpan: '+err.message); btn.disabled = false; btn.textContent = 'Cuba lagi'; }
 }
@@ -1356,7 +1444,7 @@ function vEntryLi(e){
   return `<button class="li" data-open="${e.id}">${gradeBox(e.grade)}
     <div class="b"><div class="ttl">${fmtD(e.date)} · ${esc(e.time)}${S.role==='coord'?` · ${esc(e.ward)}`:''}</div>
       <div class="sub">${S.screen==='notif'||S.screen==='overall'||S.audit==='all'?`<b>${tplOf(e).short}</b> · `:''}${esc(e.auditor)} · <span class="mono">${pctTxt(e.pct)}</span> · ${e.done}/${tplOf(e).sections.length} seksyen</div>
-      <div class="tags">${statusPill(e.status)}${e.openIssues?`<span class="pill p-bad nodot">${e.openIssues} dapatan belum diperbetulkan</span>`:''}${Object.values(e.photos||{}).flat().length?`<span class="pill p-off nodot">${Object.values(e.photos).flat().length} gambar</span>`:''}</div></div>
+      <div class="tags">${e._pending?'<span class="pill p-warn">Dalam telefon · belum dihantar</span>':''}${statusPill(e.status)}${e.openIssues?`<span class="pill p-bad nodot">${e.openIssues} dapatan belum diperbetulkan</span>`:''}${Object.values(e.photos||{}).flat().length?`<span class="pill p-off nodot">${Object.values(e.photos).flat().length} gambar</span>`:''}</div></div>
   </button>`;
 }
 function vList(list, coord){
@@ -1428,24 +1516,19 @@ async function setFix(key, done){
   const e = S.entries.find(x => x.id === eid); if(!e) return;
   const r = e.answers[iid];
   const btn = document.querySelector(`[data-fix="${key}"]`);
+  let res;
   try{
     if(done){
       const note = (S.fixNote[key] || '').trim();
-      const stage = S.fixStage[key] || [];
       if(!note){ toast('Sila tulis tindakan pembetulan yang diambil.'); return; }
-      if(btn){ btn.disabled = true; }
-      const ki = withAudit(e.audit, () => keyInfo(iid)), up = [];
-      for(let i=0; i<stage.length; i++){
-        const f = stage[i]; if(btn) btn.textContent = `Muat naik bukti ${i+1}/${stage.length}…`;
-        const res = await api('uploadEvidence', {entryId:eid, itemId:iid, ward:e.ward, section:ki.s.t, item:ki.txt, name:f.name, mime:f.type, dataUrl:f.data, fileId:f.id});
-        up.push({id:f.id, name:f.name, type:f.type, url:res.url});
-      }
-      r.fix = 'done'; r.fixNote = note; r.fixBy = S.ward; r.fixAt = iso(today()); r.fixFiles = (r.fixFiles||[]).concat(up);
+      if(btn) btn.disabled = true;
+      const stage = (S.fixStage[key] || []).map(f => ({id:f.id, name:f.name, type:f.type, data:f.data}));
+      r.fix = 'done'; r.fixNote = note; r.fixBy = S.ward; r.fixAt = iso(today()); r.fixFiles = (r.fixFiles||[]).concat(stage);
       delete S.fixStage[key]; delete S.fixNote[key];
     } else { delete r.fix; S.fixNote[key] = r.fixNote || ''; delete r.fixNote; }
-    finalize(e);
-    await api('saveEntry', {entry:e});
-    toast(done ? 'Tindakan pembetulan disimpan' : 'Dibuka semula — kemaskini tindakan');
+    res = await persistEntry(e, t => { if(btn) btn.textContent = t; });
+    if(!res.queued){ const i = S.entries.findIndex(x => x.id === eid); if(i>=0) S.entries[i] = res.entry; }
+    toast(res.queued ? 'Tiada internet — tindakan disimpan dalam telefon dan akan dihantar automatik.' : done ? 'Tindakan pembetulan disimpan' : 'Dibuka semula — kemaskini tindakan', res.queued ? 5000 : 2600);
   }catch(err){ toast('Gagal simpan: '+err.message); if(btn){ btn.disabled=false; btn.textContent='Cuba lagi'; } return; }
   if($('#modal').innerHTML) openDetail(eid);
   render();
@@ -1759,7 +1842,7 @@ document.addEventListener('click', async ev => {
     case 'togglePw': S.showPw = !S.showPw; { const keep = {u:$('#lgUser')?.value, i:$('#lgIc')?.value, p:$('#lgPass')?.value, w:$('#lgWard')?.value}; render(); if($('#lgUser')) $('#lgUser').value = keep.u||''; if($('#lgIc')) $('#lgIc').value = keep.i||''; if($('#lgPass')) $('#lgPass').value = keep.p||''; if($('#lgWard')&&keep.w) $('#lgWard').value = keep.w; } break;
     case 'remind': S.showRemind = !S.showRemind; { const keep = {u:$('#lgUser')?.value, i:$('#lgIc')?.value, p:$('#lgPass')?.value, w:$('#lgWard')?.value}; render(); if($('#lgUser')) $('#lgUser').value = keep.u||''; if($('#lgIc')) $('#lgIc').value = keep.i||''; if($('#lgPass')) $('#lgPass').value = keep.p||''; if($('#lgWard')&&keep.w) $('#lgWard').value = keep.w; } break;
     case 'fillDemo': if(S.loginTab==='staff'){ if(!S.loginBld){ S.loginBld='Main'; render(); } $('#lgIc').value='wad123'; if(!$('#lgWard').value) $('#lgWard').value = S.wards.find(w => bldOf(w)===S.loginBld); } else { $('#lgUser').value='koordinator'; $('#lgPass').value='nursing'; } break;
-    case 'logout': try{ sessionStorage.removeItem('smartn_sess'); }catch(e){} Object.assign(S,{screen:'login', role:null, user:null, token:null, draft:null, entries:[], tab:'dash', repEntry:null}); render(); break;
+    case 'logout': if(NET.queue.length && !S._confirmOut){ S._confirmOut = true; toast(`${NET.queue.length} data belum dihantar. Tekan log keluar sekali lagi untuk teruskan (data kekal dalam telefon).`, 6000); break; } S._confirmOut = false; try{ localStorage.removeItem('smartn_sess'); }catch(e){} Object.assign(S,{screen:'login', role:null, user:null, token:null, draft:null, entries:[], tab:'dash', repEntry:null}); render(); break;
     case 'copyPhone': try{ await navigator.clipboard.writeText(CONFIG.CONTACT_EMAIL); toast('E-mel disalin'); }catch(e){ toast('Tekan lama e-mel untuk salin'); } break;
     case 'home': S.screen= S.role==='coord' ? 'coord' : 'home'; S.tab='dash'; render(); window.scrollTo(0,0); break;
     case 'overall': S.screen='overall'; render(); window.scrollTo(0,0); break;
@@ -1802,6 +1885,7 @@ document.addEventListener('input', ev => {
 });
 document.addEventListener('keydown', ev => { if(ev.key!=='Escape') return; if($('#modal2').innerHTML) $('#modal2').innerHTML=''; else if($('#modal').innerHTML) $('#modal').innerHTML=''; });
 
+if('serviceWorker' in navigator && location.protocol === 'https:'){ navigator.serviceWorker.register('sw.js').catch(() => {}); }
 boot();
 </script>
 
